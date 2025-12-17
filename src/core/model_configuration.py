@@ -77,6 +77,82 @@ from ..optimization.compatibility import (
 from ..optimization.blockswap import is_blockswap_enabled, validate_blockswap_config, apply_block_swap_to_dit, cleanup_blockswap
 from ..optimization.memory_manager import cleanup_dit, cleanup_vae
 from ..utils.constants import find_model_file
+from .fix_inductor import _fix_inductor_windows_encoding
+
+# Apply global configuration for torch._dynamo immediately upon import
+# This ensures settings are active before any compilation occurs
+try:
+    import torch._dynamo
+    # Fix for GGUF/Quantized models: Guard check failed on quantized_weight size mismatch
+    # Allow dynamic parameter shapes to prevent recompilation loops or guard failures
+    # This is critical for GGUF models where buffer sizes might vary
+    torch._dynamo.config.force_parameter_static_shapes = False
+    # Suppress errors to prevent crashing on minor guard failures if possible
+    torch._dynamo.config.suppress_errors = True
+except ImportError:
+    pass
+
+# Fix for Windows UnicodeDecodeError in torch.compile (inductor)
+# Prevents "UnicodeDecodeError: 'utf-8' codec can't decode byte 0x83"
+# by forcing MSVC compiler to output English (ASCII) messages.
+if os.name == 'nt':
+    os.environ["VSLANG"] = "1033"
+    # Apply monkey-patch for inductor encoding issues
+    _fix_inductor_windows_encoding()
+    
+    # Explicitly add OpenMP and Windows SDK include paths for Visual Studio 2022
+    # Fixes "fatal error C1083" for 'omp.h', 'crtdbg.h', 'basetsd.h', etc.
+    try:
+        # MSVC headers (omp.h, yvals.h, etc.)
+        # MSVC 14.44.35207
+		# WARNING: This path is system-dependent and may differ across versions and installations.
+        msvc_include_path = r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include"
+        
+        # Windows SDK headers (version 10.0.26100.0)
+        # UCRT (crtdbg.h, etc.)
+        ucrt_include_path = r"C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\ucrt"
+        # Shared (basetsd.h, etc.)
+        shared_include_path = r"C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\shared"
+        # UM (windows.h, etc.)
+        um_include_path = r"C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\um"
+        
+        # Add all paths to INCLUDE
+        paths_to_add = [msvc_include_path, ucrt_include_path, shared_include_path, um_include_path]
+        
+        current_include = os.environ.get("INCLUDE", "")
+        for path in paths_to_add:
+            if os.path.exists(path) and path not in current_include:
+                if current_include:
+                    current_include = f"{current_include};{path}"
+                else:
+                    current_include = path
+                    
+        os.environ["INCLUDE"] = current_include
+        
+        # Explicitly add Library paths for Linker (LNK1104 fix)
+        # MSVC Libs (msvcprt.lib, etc.)
+		# WARNING: This path is system-dependent and may differ across versions and installations.
+        msvc_lib_path = r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\lib\x64"
+        
+        # Windows SDK Libs (kernel32.lib, ucrt.lib, etc.)
+        ucrt_lib_path = r"C:\Program Files (x86)\Windows Kits\10\Lib\10.0.26100.0\ucrt\x64"
+        um_lib_path = r"C:\Program Files (x86)\Windows Kits\10\Lib\10.0.26100.0\um\x64"
+        
+        # Add all paths to LIB
+        libs_to_add = [msvc_lib_path, ucrt_lib_path, um_lib_path]
+        
+        current_lib = os.environ.get("LIB", "")
+        for path in libs_to_add:
+            if os.path.exists(path) and path not in current_lib:
+                if current_lib:
+                    current_lib = f"{current_lib};{path}"
+                else:
+                    current_lib = path
+                    
+        os.environ["LIB"] = current_lib
+    except Exception:
+        # Fail silently if paths cannot be set
+        pass
 
 
 def _configs_equal(config1: Optional[Dict[str, Any]], config2: Optional[Dict[str, Any]]) -> bool:
